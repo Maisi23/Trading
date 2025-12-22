@@ -76,9 +76,7 @@ class BotAnalyzer:
         if total_loss == 0:
             return float("inf")
         
-<<<<<<< HEAD
-        return round(total_profit / abs(total_loss), 2)
-=======
+
         return round(total_profit / abs(total_loss), 2)
 
 
@@ -247,4 +245,4 @@ def max_drawdown_in_R(data:pd.DataFrame):
     dd_in_R = balance_n - peak
     return dd_in_R.min() 
 """
->>>>>>> 090e82f (add firts class)
+
