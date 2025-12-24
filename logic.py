@@ -1,88 +1,188 @@
 import pandas as pd
 
+#! Las funciones de métricas NUNCA crean columnas
+#! Las funciones de transformación NUNCA calculan métricas
+
 class BotAnalyzer:
-    def __init__(self,trades,initial_balance=5000,risk=0.01):
+    def __init__(self,trades:pd.DataFrame,initial_balance=5000,risk=0.01):
+        
         self.df = trades.copy()
 
-        self.initial_balance = initial_balance
-        self.risk = risk 
-        
-        required = {"Profit","Balance"}
+      
+        if not isinstance(self.df,pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame")
+
+        required = {"Profit"}
+
         if not required.issubset(self.df.columns):
-            raise KeyError("Columns 'Profit' and 'Balance' are required")
+            raise KeyError("Columns 'Profit' and are required")
 
-
-    def win_rate(self,BE = False):
+    @staticmethod
+    def win_rate(df:pd.DataFrame,BE = False):
         """
-        Calcula los ratios para el bots o para el total de la cuenta
-        Nota: Se considera BE cuando el profit fue menor que el 0.15% del balance actual
+        Rate = n°(wins|loss|BE) / total trades * 100
+        Note: A trade is considered BE when profit is less than 0.05 R-multiple
         """
-         
-        data= self.df
-
-        #Calculo
-        total = data["Profit"].count()
-        if total==0: return 0
-
+        BE_THRESHOLD = 0.05
+        temp_df= df.copy()
         percent = lambda x: round(x*100/total,2)  
 
-        win = (
-            (data["Profit"] > 0) & 
-           (data["Profit"] > data["Balance"]*0.0015)
-        ).sum()
-         
-        losses = (data["Profit"] < 0 ).sum()
-        
-        #Diccionario base
-        dicc =  {
-            "Win":[f"{percent(win)}%",win],
-            "Loss":[f"{percent(losses)}%",losses]
-        }
+        total = temp_df["Profit"].count()
+        if total==0: return 0
 
+    
+        base_dict = {}
         
-
-        #Queres los breakeven?
         if BE:
+            win = (temp_df["R-multiple"] > BE_THRESHOLD).sum()
             breakeven = (
-                (data["Profit"] <= data["Balance"]*0.0015) & 
-                (data["Profit"] > 0)
+                (temp_df["R-multiple"] <= BE_THRESHOLD) & 
+                (temp_df["R-multiple"] > 0)
             ).sum()
-            
-            dicc["BE"] = [f"{percent(breakeven)}%",breakeven]
+
+            losses = (temp_df["Profit"] < 0 ).sum()
+
+            base_dict.update({
+                              "Win":[f"{percent(win)}%",win],
+                              "Loss":[f"{percent(losses)}%",losses],
+                              "BE":[f"{percent(breakeven)}%",breakeven]
+                              })    
+
+        else:
+            win = (temp_df["R-multiple"] > 0).sum()
+            losses = (temp_df["R-multiple"] <= 0 ).sum()
+            base_dict.update({
+                              "Win":[f"{percent(win)}%",win],
+                              "Loss":[f"{percent(losses)}%",losses]
+                              })
+
         
-        #Añado el total
-        
-        dicc["Total"] = ["100%", total]
+        #Adding total 
+        base_dict["Total"] = ["100%", total]
 
 
-        return pd.DataFrame(dicc,index=["Percent","n"])
+        return pd.DataFrame(base_dict,index=["Percent","n"])
 
-
-    def profit_factor(self):
+    @staticmethod
+    def profit_factor(df:pd.DataFrame):
         """
-        #* Profit Factor =  sum(positive profits) 
+        Note: No considered in the calculation a trade as profit if R-multiple < 0.05 (BE)
+        #* Profit Factor =  sum(R+) 
         #*                  --------------------------
-        #*                  abs(sum(negative profits))
-        """
-        profits = self.df["Profit"]
+        #*                  | sum(R-) |
         
-        if "Profit" not in self.df.columns:
-            raise KeyError("Column 'Profit' is required")
+        """
+        BE_THRESHOLD = 0.05
 
+        #Check if R-multiple column exists
+     
+        if "R-multiple" not in df.columns:
+            raise KeyError("Column 'R-multiple' is required")
+        
 
-        total_profit = profits[profits > 0].sum()
-        total_loss = profits[profits < 0].sum()
+        #Select R-multiple column
+        r = df["R-multiple"]
+        
 
-        if total_loss == 0:
+        #Calculate total R+ and R-
+
+        r_positive = r[r >= BE_THRESHOLD].sum()
+        r_negative = r[r < BE_THRESHOLD].sum()
+
+        #Handle division by zero
+        if r_negative == 0:
             return float("inf")
         
 
-        return round(total_profit / abs(total_loss), 2)
+        result = round(r_positive / abs(r_negative), 5)
 
+        return result
 
+    def _point_value(self):
 
+        # copy dataframe to avoid modifying original
 
+        temp_df = self.df.copy()
+        
+        #*Fomula point value    =        |Profit|
+        # *                          ----------------------------
+        #  *                         |P.Entry-P.Exit|*Volume 
+        
+        temp_df["point_value"] = temp_df["Profit"].abs()/((temp_df["Price Entry"]-temp_df["Price Exit"]).abs()*temp_df["Volume"])
+        
+        #create dictionary with median point value per symbol
 
+        point_value_dict = dict(temp_df.groupby("Symbol")["point_value"].median().round(2))
+       
+        return point_value_dict
+    
+    
+    
+    def add_R(self):
+        
+        # copy dataframe to avoid modifying original
+        temp_df = self.df.copy()
+        
+        #R-multiple is column already?
+        if "R-multiple" in temp_df.columns:
+            return self
+
+        #Drop trades without initial stop loss
+        
+        temp_df= temp_df.drop(temp_df[temp_df["S / L"] ==0].index)
+        temp_df = temp_df.reset_index(drop=True)
+    
+
+        pv = self._point_value()
+
+        #* Formula R(usd): |P.Entry-SL|* Volumen* point_value
+        
+        r_usd = abs(temp_df["Price Entry"] - temp_df["S / L"]) * temp_df["Volume"] * temp_df["Symbol"].map(pv)
+         
+        # Create a new column 'R(usd)' in the DataFrame
+
+        temp_df["R(usd)"] = r_usd.round(2)
+        
+        #* Formula R-multiple: Profit / R(usd)
+
+        temp_df["R-multiple"] = (temp_df["Profit"]/temp_df["R(usd)"]).round(2)
+        
+        # Assign back to self.df for return a BotAnalyzer object 
+
+        self.df = temp_df
+
+        return self
+            
+    @staticmethod
+    def expectancy_R(df:pd.DataFrame) -> float:
+        """
+        Expectancy in R = mean(R)
+        """
+        if "R-multiple" not in df.columns:
+            raise KeyError("Column 'R-multiple' is required")
+        
+
+        result = round(df["R-multiple"].mean(),2)
+        
+        return result
+    
+    @staticmethod
+    def maxDD_R(df:pd.DataFrame) -> float:
+        """
+        Max Drawdown in R-multiple
+        """
+
+        if "R-multiple" not in df.columns:
+            raise KeyError("Column 'R-multiple' is required")
+       
+        r = df["R-multiple"]
+
+        balance_n = r.cumsum() 
+        peak = balance_n.cummax()
+        dd_in_R = balance_n - peak
+        return round(dd_in_R.min(),2)
+     
+    
 
 
 
